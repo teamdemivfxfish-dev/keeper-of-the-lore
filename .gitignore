@@ -1,0 +1,17 @@
+# --- Secrets: NEVER commit ---
+.env
+.env.local
+.env.*.local
+
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# --- Runtime data / caches (regenerated at runtime) ---
+.rag_cache.pkl
+keeper_state.json
+*.log
+boot*.err.log
