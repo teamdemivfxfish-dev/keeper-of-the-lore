@@ -179,44 +179,60 @@ def set_player_lore(entries: list[str]) -> None:
     log.info("Local player-lore index updated (%d entries).", len(entries))
 
 
-def retrieve(text: str, query: str, k: int = TOP_K) -> list[str]:
-    """Top-k passages from the canon, plus any approved player lore, merged by score."""
+def retrieve(text: str, query: str, k: int = TOP_K) -> tuple[list[str], list[str]]:
+    """Return (saga_passages, community_passages): the strongest k passages overall,
+    split by source so the prompt can keep the original saga and player-established
+    lore clearly apart (and the model cannot fuse one into the other)."""
     idx = get_index(text)
     q = _embed(query, "query")
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, str, bool]] = []  # (score, text, is_player)
 
     sims = idx["embeds"] @ q
     for i in np.argsort(-sims)[:k]:
-        scored.append((float(sims[i]), idx["chunks"][i]))
+        scored.append((float(sims[i]), idx["chunks"][i], False))
 
     if _player is not None:
         psims = _player["embeds"] @ q
         for i in np.argsort(-psims)[:k]:
-            scored.append((float(psims[i]), _player["chunks"][i]))
+            scored.append((float(psims[i]), _player["chunks"][i], True))
 
     scored.sort(key=lambda s: -s[0])
-    return [c for _, c in scored[:k]]
+    top = scored[:k]
+    saga = [t for _, t, p in top if not p]
+    player = [t for _, t, p in top if p]
+    return saga, player
 
 
 # --------------------------------------------------------------------------- #
 # Generation
 # --------------------------------------------------------------------------- #
 
-def _rag_system(preamble: str, retrieved: list[str], instructions: str) -> str:
-    body = "\n\n---\n\n".join(retrieved)
-    return (
-        preamble
-        + "\n\n===== RELEVANT PASSAGES FROM THE WARBORN REALM =====\n"
-        + body
-        + "\n===== END PASSAGES =====\n\n"
-        + instructions
-    )
+def _rag_system(preamble: str, saga: list[str], player: list[str], instructions: str) -> str:
+    """Build the system prompt with the two sources in clearly separated sections."""
+    parts = [preamble]
+    if saga:
+        parts.append(
+            "===== PASSAGES FROM THE ORIGINAL SAGA (BARUNN's canon) =====\n"
+            + "\n\n---\n\n".join(saga)
+            + "\n===== END SAGA PASSAGES ====="
+        )
+    if player:
+        parts.append(
+            "===== COMMUNITY LORE (established by players; a SEPARATE source, NOT part of "
+            "the original saga, and never to be blended with it) =====\n"
+            + "\n\n---\n\n".join(player)
+            + "\n===== END COMMUNITY LORE ====="
+        )
+    if not saga and not player:
+        parts.append("(No passages were found for this question.)")
+    parts.append(instructions)
+    return "\n\n".join(parts)
 
 
 def local_answer(text: str, question: str, preamble: str, instructions: str) -> str:
     """Q&A through the local model over retrieved passages."""
-    retrieved = retrieve(text, question)
-    system = _rag_system(preamble, retrieved, instructions)
+    saga, player = retrieve(text, question)
+    system = _rag_system(preamble, saga, player, instructions)
     resp = _client.chat(
         model=OLLAMA_MODEL,
         messages=[
@@ -233,8 +249,8 @@ def local_answer(text: str, question: str, preamble: str, instructions: str) -> 
 def _local_json(text: str, retrieve_query: str, user_content: str,
                 preamble: str, instructions: str, schema: dict) -> Optional[dict]:
     """Shared helper: RAG-retrieve, then a JSON-constrained local chat call."""
-    retrieved = retrieve(text, retrieve_query)
-    system = _rag_system(preamble, retrieved, instructions)
+    saga, player = retrieve(text, retrieve_query)
+    system = _rag_system(preamble, saga, player, instructions)
     resp = _client.chat(
         model=OLLAMA_MODEL,
         messages=[
